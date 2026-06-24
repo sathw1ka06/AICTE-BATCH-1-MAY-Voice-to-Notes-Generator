@@ -55,11 +55,21 @@ with st.sidebar:
             st.session_state.viewing_lecture_id = None
             st.session_state.confirm_delete_id = None
             st.rerun()
-
     st.markdown(
-        '<div class="sidebar-footer">Powered by Whisper &amp; Gemini 2.5 Flash</div>',
-        unsafe_allow_html=True,
+    '''
+    <div class="sidebar-footer">
+        Powered by Whisper &amp; Gemini 2.5 Flash<br>
+        <span style="font-size:0.79rem; opacity:0.9;">
+            Page switching may take a few seconds
+        </span>
+    </div>
+    ''',
+    unsafe_allow_html=True,
     )
+    #st.markdown(
+      #  '<div class="sidebar-footer">Powered by Whisper &amp; Gemini 2.5 Flash</div>',
+      #  unsafe_allow_html=True,
+    #)
 
 # Page routing
 _page = st.session_state.page
