@@ -79,7 +79,7 @@ def _get_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def _generate_with_retry(prompt: str) -> str:
+def _generate_with_retry(prompt: str, temperature: float = 0.65) -> str:
     client = _get_client()
     last_exc = None
 
@@ -89,7 +89,7 @@ def _generate_with_retry(prompt: str) -> str:
                 model=MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.65,
+                    temperature=temperature,
                 ),
             )
             return response.text
@@ -175,6 +175,56 @@ def _parse_flashcards(text: str) -> list:
         cards.append({"question": question, "answer": " ".join(answer_parts).strip()})
 
     return cards
+
+
+_EVAL_TEMPLATE = """You are an educational assessment assistant evaluating a student's flashcard answer.
+
+Question: {question}
+Expected Answer: {expected_answer}
+Student's Answer: {student_answer}
+
+Evaluate semantic understanding — do NOT require exact wording.
+
+Respond in EXACTLY this format (one field per line, no extra lines):
+Result: [Correct, Partially Correct, or Incorrect]
+Feedback: [one sentence explaining your evaluation]
+Expected: [restate the expected answer verbatim]
+
+Criteria:
+- Correct: student demonstrates clear understanding of the core concept
+- Partially Correct: student shows some understanding but misses key aspects
+- Incorrect: answer is wrong, off-topic, or shows no relevant understanding"""
+
+
+def evaluate_flashcard_answer(question: str, expected_answer: str, student_answer: str) -> dict:
+    """Call Gemini to semantically evaluate a student's flashcard answer."""
+    prompt = _EVAL_TEMPLATE.format(
+        question=question,
+        expected_answer=expected_answer,
+        student_answer=student_answer,
+    )
+    raw = _generate_with_retry(prompt, temperature=0.1)
+    return _parse_evaluation(raw, expected_answer)
+
+
+def _parse_evaluation(text: str, fallback_expected: str = "") -> dict:
+    out = {"result": "❌ Incorrect", "feedback": "", "expected": fallback_expected}
+    for line in text.splitlines():
+        stripped = line.strip()
+        low = stripped.lower()
+        if low.startswith("result:"):
+            val = stripped[7:].strip().lower()
+            if "partially" in val:
+                out["result"] = "⚠️ Partially Correct"
+            elif "correct" in val:
+                out["result"] = "✅ Correct"
+            else:
+                out["result"] = "❌ Incorrect"
+        elif low.startswith("feedback:"):
+            out["feedback"] = stripped[9:].strip()
+        elif low.startswith("expected:"):
+            out["expected"] = stripped[9:].strip()
+    return out
 
 
 def _parse_quiz(text: str) -> list:

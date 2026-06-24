@@ -97,7 +97,6 @@ def _show_viewer(lecture_id: int):
 
     st.subheader(title)
 
-    # Show duration only when Whisper returned a meaningful value
     if dur_min >= 0.1:
         st.caption(f"{word_count:,} words  ·  {dur_min:.1f} min")
     else:
@@ -142,52 +141,262 @@ def _notes_tab(lecture: dict):
         st.info("No study notes available for this lecture.")
 
 
+# ===========================================================================
+# Flashcards — Two-stage learning system
+# ===========================================================================
+
 def _flashcards_tab(lecture: dict):
     flashcards = lecture.get("flashcards") or []
-
     if not flashcards:
         st.info("No flashcards available for this lecture.")
         return
 
-    st.caption(f"{len(flashcards)} flashcard(s)")
+    lec_id = lecture["id"]
+    sk = f"fc_{lec_id}"
+    if sk not in st.session_state:
+        st.session_state[sk] = {
+            "mode": "learn",     # "learn" | "test" | "complete"
+            "learn_idx": 0,
+            "test_idx": 0,
+            "test_result": None,
+            "results": [],       # list of "correct" | "partial" | "incorrect"
+        }
+    s = st.session_state[sk]
 
-    for i, card in enumerate(flashcards, 1):
-        question = card.get("question") or ""
-        answer = card.get("answer") or ""
-        label = f"Card {i}: {question[:70]}{'…' if len(question) > 70 else ''}"
-        with st.expander(label):
-            st.markdown(f"**Question:** {question}")
-            st.divider()
-            st.markdown(f"**Answer:** {answer}")
+    if s["mode"] == "learn":
+        _fc_learn(flashcards, s)
+    elif s["mode"] == "test":
+        _fc_test(flashcards, s, lec_id)
+    else:
+        _fc_complete(flashcards, s)
 
+
+def _fc_learn(flashcards: list, s: dict):
+    n = len(flashcards)
+    idx = s["learn_idx"]
+    card = flashcards[idx]
+
+    st.caption(f"Learn Mode  ·  Card {idx + 1} of {n}")
+    st.markdown("")
+
+    with st.container(border=True):
+        st.markdown("**Question:**")
+        st.markdown(card.get("question", ""))
+        st.divider()
+        st.markdown("**Answer:**")
+        st.markdown(card.get("answer", ""))
+
+    st.markdown("")
+    col_prev, col_next = st.columns(2)
+    with col_prev:
+        if st.button("← Previous Card", disabled=(idx == 0), use_container_width=True):
+            s["learn_idx"] -= 1
+            st.rerun()
+    with col_next:
+        if idx < n - 1:
+            if st.button("Next Card →", use_container_width=True):
+                s["learn_idx"] += 1
+                st.rerun()
+        else:
+            if st.button("Start Flashcard Test", type="primary", use_container_width=True):
+                s["mode"] = "test"
+                s["test_idx"] = 0
+                s["test_result"] = None
+                s["results"] = []
+                st.rerun()
+
+
+def _fc_test(flashcards: list, s: dict, lec_id: int):
+    n = len(flashcards)
+    idx = s["test_idx"]
+    card = flashcards[idx]
+
+    st.caption(f"Test Mode  ·  Question {idx + 1} of {n}")
+    st.markdown("")
+
+    with st.container(border=True):
+        st.markdown("**Question:**")
+        st.markdown(card.get("question", ""))
+
+    st.markdown("")
+    result = s["test_result"]
+
+    if result is None:
+        # Input phase
+        answer_key = f"fc_ans_{lec_id}_{idx}"
+        student_answer = st.text_area(
+            "Type your answer:",
+            key=answer_key,
+            height=120,
+            placeholder="Write your answer from memory…",
+        )
+        if st.button(
+            "Check Answer",
+            type="primary",
+            disabled=not (student_answer or "").strip(),
+        ):
+            from services.gemini_service import evaluate_flashcard_answer
+            with st.spinner("Evaluating your answer…"):
+                eval_result = evaluate_flashcard_answer(
+                    question=card.get("question", ""),
+                    expected_answer=card.get("answer", ""),
+                    student_answer=student_answer.strip(),
+                )
+            s["test_result"] = eval_result
+            st.rerun()
+    else:
+        # Result phase
+        result_label = result.get("result", "❌ Incorrect")
+        feedback = result.get("feedback", "")
+        expected = result.get("expected") or card.get("answer", "")
+
+        if "✅" in result_label:
+            st.success(f"**{result_label}**")
+        elif "⚠️" in result_label:
+            st.warning(f"**{result_label}**")
+        else:
+            st.error(f"**{result_label}**")
+
+        if feedback:
+            st.markdown(f"**Feedback:** {feedback}")
+
+        with st.expander("Show Expected Answer"):
+            st.markdown(expected)
+
+        st.markdown("")
+
+        def _record(result_label: str):
+            if "✅" in result_label:
+                s["results"].append("correct")
+            elif "⚠️" in result_label:
+                s["results"].append("partial")
+            else:
+                s["results"].append("incorrect")
+
+        if idx < n - 1:
+            if st.button("Next Question →", type="primary", use_container_width=True):
+                _record(result_label)
+                s["test_idx"] += 1
+                s["test_result"] = None
+                st.rerun()
+        else:
+            if st.button("See My Results", type="primary", use_container_width=True):
+                _record(result_label)
+                s["mode"] = "complete"
+                st.rerun()
+
+
+def _fc_complete(flashcards: list, s: dict):
+    results = s.get("results", [])
+    n = len(flashcards)
+    correct = results.count("correct")
+    partial = results.count("partial")
+    incorrect = results.count("incorrect")
+    total = correct + partial + incorrect
+    accuracy = int((correct + partial * 0.5) / total * 100) if total > 0 else 0
+
+    st.markdown("### Flashcard Test Complete")
+    st.markdown("")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Questions", total)
+    c2.metric("✅ Correct", correct)
+    c3.metric("⚠️ Partially Correct", partial)
+    c4.metric("❌ Incorrect", incorrect)
+
+    st.metric("Accuracy", f"{accuracy}%")
+
+    st.markdown("")
+    col_r, col_l = st.columns(2)
+    with col_r:
+        if st.button("Retake Test", use_container_width=True):
+            s.update({"mode": "test", "test_idx": 0, "test_result": None, "results": []})
+            st.rerun()
+    with col_l:
+        if st.button("Return to Learn Mode", use_container_width=True):
+            s.update({"mode": "learn", "learn_idx": 0, "test_result": None, "results": []})
+            st.rerun()
+
+
+# ===========================================================================
+# Quiz — Interactive per-question submission with score tracking
+# ===========================================================================
 
 def _quiz_tab(lecture: dict):
     quiz = lecture.get("quiz") or []
-
     if not quiz:
         st.info("No quiz available for this lecture.")
         return
 
-    st.caption(f"{len(quiz)} question(s)")
+    lec_id = lecture["id"]
+    sk = f"quiz_{lec_id}"
+    if sk not in st.session_state:
+        st.session_state[sk] = {"submitted": {}, "score": 0}
+    s = st.session_state[sk]
 
-    for i, q in enumerate(quiz, 1):
-        question = q.get("question") or ""
+    answered = sum(1 for v in s["submitted"].values() if v)
+    st.caption(f"{answered}/{len(quiz)} answered")
+    st.markdown("")
+
+    for i, q in enumerate(quiz):
+        question_text = q.get("question") or ""
         correct = q.get("correct") or ""
-        label = f"Q{i}: {question[:70]}{'…' if len(question) > 70 else ''}"
+        options = q.get("options") or []
+        explanation = q.get("explanation") or ""
+        radio_key = f"quiz_r_{lec_id}_{i}"
 
-        with st.expander(label):
-            st.markdown(f"**{question}**")
+        with st.container(border=True):
+            st.markdown(f"**Q{i + 1}. {question_text}**")
             st.markdown("")
 
-            for opt in q.get("options") or []:
-                if opt and opt[0] == correct:
-                    st.markdown(f"**{opt} ✓**")
-                else:
-                    st.markdown(f"{opt}")
+            if s["submitted"].get(i):
+                # Answered — show result with highlighting
+                selected = st.session_state.get(radio_key) or ""
+                sel_letter = selected[0] if selected else ""
 
-            if correct or q.get("explanation"):
-                st.divider()
-            if correct:
-                st.markdown(f"**Correct Answer:** {correct}")
-            if q.get("explanation"):
-                st.markdown(f"*{q['explanation']}*")
+                for opt in options:
+                    letter = opt[0] if opt else ""
+                    if letter == correct:
+                        st.markdown(f"✅ **{opt}**")
+                    elif letter == sel_letter:
+                        st.markdown(f"❌ {opt}")
+                    else:
+                        st.markdown(f"◻ {opt}")
+
+                if explanation:
+                    st.info(f"💡 {explanation}")
+            else:
+                # Interactive — radio + submit button
+                selected = st.radio(
+                    "options",
+                    options=options,
+                    key=radio_key,
+                    label_visibility="collapsed",
+                    index=None,
+                )
+                if st.button(
+                    "Submit Answer",
+                    key=f"quiz_sub_{lec_id}_{i}",
+                    disabled=(selected is None),
+                ):
+                    s["submitted"][i] = True
+                    if (selected or "")[0:1] == correct:
+                        s["score"] += 1
+                    st.rerun()
+
+    # Final score summary after all questions answered
+    if answered == len(quiz):
+        st.divider()
+        score = s["score"]
+        pct = int(score / len(quiz) * 100)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Score", f"{score}/{len(quiz)}")
+        c2.metric("Correct", score)
+        c3.metric("Accuracy", f"{pct}%")
+
+        if st.button("Retake Quiz", key=f"quiz_retake_{lec_id}"):
+            del st.session_state[sk]
+            for j in range(len(quiz)):
+                st.session_state.pop(f"quiz_r_{lec_id}_{j}", None)
+            st.rerun()
