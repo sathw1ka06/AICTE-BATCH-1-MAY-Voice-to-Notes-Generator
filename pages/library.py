@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 
 import streamlit as st
@@ -83,6 +84,12 @@ def render():
 # Lecture Viewer
 # ---------------------------------------------------------------------------
 
+@st.cache_data(show_spinner=False)
+def _cached_pdf(lecture_id: int, _lecture: dict) -> bytes:
+    from services.pdf_service import generate_pdf
+    return generate_pdf(_lecture).getvalue()
+
+
 def _show_viewer(lecture_id: int):
     lecture = get_lecture_by_id(lecture_id)
     if not lecture:
@@ -101,6 +108,22 @@ def _show_viewer(lecture_id: int):
         st.caption(f"{word_count:,} words  ·  {dur_min:.1f} min")
     else:
         st.caption(f"{word_count:,} words")
+
+    st.divider()
+
+    # ---- PDF download button ----
+    try:
+        pdf_bytes = _cached_pdf(lecture_id, lecture)
+        safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")
+        filename = f"{safe_title}_Study_Guide.pdf" if safe_title else "Study_Guide.pdf"
+        st.download_button(
+            label="Download Study Guide PDF",
+            data=pdf_bytes,
+            file_name=filename,
+            mime="application/pdf",
+        )
+    except Exception:
+        st.error("Unable to generate PDF. Please try again.")
 
     st.divider()
 
