@@ -13,7 +13,7 @@ WARN_SIZE_MB = 30
 
 def render():
     st.title("Upload Lecture")
-    st.caption("Upload lecture audio to generate transcripts, notes, flashcards, and quizzes.")
+    st.caption("Upload lecture audio less than 7 mins to generate transcripts, notes, flashcards, and quizzes.")
     st.divider()
 
     # ---- Form ----
