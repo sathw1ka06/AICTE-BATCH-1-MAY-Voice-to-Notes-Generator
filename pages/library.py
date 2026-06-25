@@ -1,3 +1,4 @@
+import html
 import re
 from datetime import datetime
 
@@ -159,8 +160,131 @@ def _notes_tab(lecture: dict):
 
 
 # ===========================================================================
-# Flashcards — card-by-card learn → test → feedback flow
+# Flashcards — premium flip-card experience
 # ===========================================================================
+
+_FC_CSS = """
+<style>
+/* ---- Front card: light theme ---- */
+.eduscribe-fc-front {
+    background: #ffffff;
+    border: 2px solid #4CA771;
+    border-radius: 18px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+    padding: 32px 36px;
+    max-width: 680px;
+    min-height: 200px;
+    margin: 0 auto 20px auto;
+    box-sizing: border-box;
+}
+/* ---- Back & Test cards: dark theme ---- */
+.eduscribe-fc-back,
+.eduscribe-fc-test {
+    background: #013237;
+    border: 2px solid #4CA771;
+    border-radius: 18px;
+    box-shadow: 0 8px 30px rgba(1,50,55,0.25);
+    padding: 32px 36px;
+    max-width: 680px;
+    min-height: 200px;
+    margin: 0 auto 20px auto;
+    box-sizing: border-box;
+}
+/* ---- Result cards ---- */
+.eduscribe-fc-res-correct {
+    background: #0B5D42;
+    border: 2px solid #4CA771;
+    border-radius: 18px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.20);
+    padding: 28px 36px;
+    max-width: 680px;
+    margin: 0 auto 20px auto;
+    box-sizing: border-box;
+}
+.eduscribe-fc-res-partial {
+    background: #8A6A00;
+    border: 2px solid #c9a400;
+    border-radius: 18px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.20);
+    padding: 28px 36px;
+    max-width: 680px;
+    margin: 0 auto 20px auto;
+    box-sizing: border-box;
+}
+.eduscribe-fc-res-incorrect {
+    background: #7A1F1F;
+    border: 2px solid #c0392b;
+    border-radius: 18px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.20);
+    padding: 28px 36px;
+    max-width: 680px;
+    margin: 0 auto 20px auto;
+    box-sizing: border-box;
+}
+/* ---- Light card text ---- */
+.fc-lbl-light {
+    font-size: 11px;
+    font-weight: 700;
+    color: #4CA771;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    font-family: 'Poppins', sans-serif;
+}
+.fc-txt-light {
+    font-size: 17px;
+    color: #013237;
+    line-height: 1.7;
+    font-family: 'Poppins', sans-serif;
+    margin: 0;
+    white-space: pre-wrap;
+}
+/* ---- Dark card text ---- */
+.fc-lbl-dark {
+    font-size: 11px;
+    font-weight: 700;
+    color: #C0E6BA;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    font-family: 'Poppins', sans-serif;
+}
+.fc-txt-dark {
+    font-size: 17px;
+    color: #ffffff;
+    line-height: 1.7;
+    font-family: 'Poppins', sans-serif;
+    margin: 0;
+    white-space: pre-wrap;
+}
+/* ---- Result card text ---- */
+.fc-res-icon {
+    font-size: 34px;
+    line-height: 1;
+    margin-bottom: 10px;
+    color: #ffffff;
+}
+.fc-res-verdict {
+    font-size: 21px;
+    font-weight: 700;
+    color: #ffffff;
+    font-family: 'Poppins', sans-serif;
+    margin: 0;
+}
+/* ---- Progress label ---- */
+.fc-progress {
+    text-align: center;
+    font-size: 12px;
+    font-weight: 700;
+    color: #4CA771;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    font-family: 'Poppins', sans-serif;
+    margin-bottom: 14px;
+}
+</style>
+"""
+
 
 def _flashcards_tab(lecture: dict):
     flashcards = lecture.get("flashcards") or []
@@ -169,13 +293,15 @@ def _flashcards_tab(lecture: dict):
         return
 
     lec_id = lecture["id"]
-    sk = f"fc_{lec_id}"
+    sk = f"fc_{lec_id}_v3"
     if sk not in st.session_state:
         st.session_state[sk] = {
-            "card_idx": 0,       # current card (0-based)
-            "phase": "learn",    # "learn" | "testing" | "evaluated"
+            "card_idx": 0,
+            "card_flipped": False,
+            "test_mode": False,
+            "answer_checked": False,
             "eval_result": None,
-            "results": [],       # "correct" | "partial" | "incorrect" per card
+            "results": {},
             "done": False,
         }
     s = st.session_state[sk]
@@ -187,107 +313,163 @@ def _flashcards_tab(lecture: dict):
     n = len(flashcards)
     idx = s["card_idx"]
     card = flashcards[idx]
-    phase = s["phase"]
+    q_safe = html.escape(card.get("question") or "")
+    a_safe = html.escape(card.get("answer") or "")
 
-    phase_labels = {"learn": "Study", "testing": "Testing", "evaluated": "Result"}
-    st.caption(f"Card {idx + 1} of {n}  ·  {phase_labels[phase]}")
-    st.markdown("")
+    st.markdown(_FC_CSS, unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="fc-progress">Flashcard {idx + 1} of {n}</div>',
+        unsafe_allow_html=True,
+    )
 
-    # Question — always visible
-    with st.container(border=True):
-        st.markdown("**Question:**")
-        st.markdown(card.get("question", ""))
+    answer_checked = s["answer_checked"]
+    test_mode = s["test_mode"]
+    flipped = s["card_flipped"]
 
-    st.markdown("")
-
-    # ---- Learn phase: show answer + Test Myself ----
-    if phase == "learn":
-        with st.container(border=True):
-            st.markdown("**Answer:**")
-            st.markdown(card.get("answer", ""))
-
-        st.markdown("")
-        if st.button("Test Myself", type="primary", use_container_width=True):
-            s["phase"] = "testing"
-            st.rerun()
-
-    # ---- Testing phase: text input + Check Answer ----
-    elif phase == "testing":
-        answer_key = f"fc_ans_{lec_id}_{idx}"
-        student_answer = st.text_area(
-            "Type your answer from memory:",
-            key=answer_key,
-            height=120,
-            placeholder="Write your answer from memory…",
-        )
-        if st.button(
-            "Check Answer",
-            type="primary",
-            disabled=not (student_answer or "").strip(),
-        ):
-            from services.gemini_service import evaluate_flashcard_answer
-            with st.spinner("Evaluating your answer…"):
-                eval_result = evaluate_flashcard_answer(
-                    question=card.get("question", ""),
-                    expected_answer=card.get("answer", ""),
-                    student_answer=student_answer.strip(),
-                )
-            s["eval_result"] = eval_result
-            s["phase"] = "evaluated"
-            st.rerun()
-
-    # ---- Evaluated phase: show result + Next / Finish ----
-    else:
+    # ---- RESULT: evaluation ----
+    if answer_checked:
         result = s["eval_result"] or {}
         result_label = result.get("result", "❌ Incorrect")
         feedback = result.get("feedback", "")
         expected = result.get("expected") or card.get("answer", "")
 
         if "✅" in result_label:
-            st.success(f"**{result_label}**")
+            card_class = "eduscribe-fc-res-correct"
+            icon, verdict = "&#10003;", "Correct!"
+            s["results"][idx] = "correct"
         elif "⚠️" in result_label:
-            st.warning(f"**{result_label}**")
+            card_class = "eduscribe-fc-res-partial"
+            icon, verdict = "&#9900;", "Partially Correct"
+            s["results"][idx] = "partial"
         else:
-            st.error(f"**{result_label}**")
+            card_class = "eduscribe-fc-res-incorrect"
+            icon, verdict = "&#10007;", "Incorrect"
+            s["results"][idx] = "incorrect"
+
+        st.markdown(f"""
+        <div class="{card_class}">
+            <div class="fc-res-icon">{icon}</div>
+            <div class="fc-res-verdict">{verdict}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
         if feedback:
             st.markdown(f"**Feedback:** {feedback}")
-
-        # Always show expected answer when not fully correct
         if "✅" not in result_label:
             with st.expander("Expected Answer", expanded=True):
                 st.markdown(expected)
 
         st.markdown("")
 
-        def _record():
-            if "✅" in result_label:
-                s["results"].append("correct")
-            elif "⚠️" in result_label:
-                s["results"].append("partial")
+        col_prev, _, col_next = st.columns([3, 1, 3])
+        with col_prev:
+            if idx > 0:
+                if st.button("← Previous Flashcard", use_container_width=True,
+                             key=f"fc_prev_{lec_id}_{idx}"):
+                    s["card_idx"] -= 1
+                    s["card_flipped"] = False
+                    s["test_mode"] = False
+                    s["answer_checked"] = False
+                    s["eval_result"] = None
+                    st.rerun()
+        with col_next:
+            if idx < n - 1:
+                if st.button("Next Flashcard →", type="primary", use_container_width=True,
+                             key=f"fc_next_{lec_id}_{idx}"):
+                    s["card_idx"] += 1
+                    s["card_flipped"] = False
+                    s["test_mode"] = False
+                    s["answer_checked"] = False
+                    s["eval_result"] = None
+                    st.rerun()
             else:
-                s["results"].append("incorrect")
+                if st.button("See My Results", type="primary", use_container_width=True,
+                             key=f"fc_finish_{lec_id}"):
+                    s["done"] = True
+                    st.rerun()
 
-        if idx < n - 1:
-            if st.button("Next Flashcard →", type="primary", use_container_width=True):
-                _record()
-                s["card_idx"] += 1
-                s["phase"] = "learn"
-                s["eval_result"] = None
+    # ---- TEST MODE: question + text area ----
+    elif test_mode:
+        st.markdown(f"""
+        <div class="eduscribe-fc-test">
+            <div class="fc-lbl-dark">Question</div>
+            <div class="fc-txt-dark">{q_safe}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        ans_key = f"fc_ans_{lec_id}_{idx}"
+        student_answer = st.text_area(
+            "Your answer",
+            key=ans_key,
+            height=140,
+            placeholder="Type your answer from memory…",
+            label_visibility="collapsed",
+        )
+        _, btn_col, _ = st.columns([2, 3, 2])
+        with btn_col:
+            if st.button(
+                "Check Answer",
+                type="primary",
+                use_container_width=True,
+                key=f"fc_check_{lec_id}_{idx}",
+                disabled=not (student_answer or "").strip(),
+            ):
+                from services.gemini_service import evaluate_flashcard_answer
+                with st.spinner("Evaluating your answer…"):
+                    eval_result = evaluate_flashcard_answer(
+                        question=card.get("question", ""),
+                        expected_answer=card.get("answer", ""),
+                        student_answer=student_answer.strip(),
+                    )
+                s["eval_result"] = eval_result
+                s["answer_checked"] = True
                 st.rerun()
-        else:
-            if st.button("See My Results", type="primary", use_container_width=True):
-                _record()
-                s["done"] = True
+
+    # ---- BACK: answer ----
+    elif flipped:
+        st.markdown(f"""
+        <div class="eduscribe-fc-back">
+            <div class="fc-lbl-dark">Answer</div>
+            <div class="fc-txt-dark">{a_safe}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col_back, _, col_test = st.columns([3, 1, 3])
+        with col_back:
+            if st.button("Flip Back", use_container_width=True,
+                         key=f"fc_back_{lec_id}_{idx}"):
+                s["card_flipped"] = False
+                st.rerun()
+        with col_test:
+            if st.button("Test Myself", type="primary", use_container_width=True,
+                         key=f"fc_test_{lec_id}_{idx}"):
+                s["card_flipped"] = False
+                s["test_mode"] = True
+                st.rerun()
+
+    # ---- FRONT: question ----
+    else:
+        st.markdown(f"""
+        <div class="eduscribe-fc-front">
+            <div class="fc-lbl-light">Question</div>
+            <div class="fc-txt-light">{q_safe}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        _, btn_col, _ = st.columns([2, 3, 2])
+        with btn_col:
+            if st.button("Flip Card", type="primary", use_container_width=True,
+                         key=f"fc_flip_{lec_id}_{idx}"):
+                s["card_flipped"] = True
                 st.rerun()
 
 
 def _fc_summary(s: dict):
-    results = s.get("results", [])
-    n = len(results)
-    correct = results.count("correct")
-    partial = results.count("partial")
-    incorrect = results.count("incorrect")
+    results_list = list(s.get("results", {}).values())
+    n = len(results_list)
+    correct = results_list.count("correct")
+    partial = results_list.count("partial")
+    incorrect = results_list.count("incorrect")
     accuracy = int((correct + partial * 0.5) / n * 100) if n > 0 else 0
 
     st.markdown("### Flashcard Session Complete")
@@ -304,9 +486,11 @@ def _fc_summary(s: dict):
     if st.button("Restart Flashcards", use_container_width=True):
         s.update({
             "card_idx": 0,
-            "phase": "learn",
+            "card_flipped": False,
+            "test_mode": False,
+            "answer_checked": False,
             "eval_result": None,
-            "results": [],
+            "results": {},
             "done": False,
         })
         st.rerun()
