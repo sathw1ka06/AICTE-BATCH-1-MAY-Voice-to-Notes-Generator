@@ -84,12 +84,6 @@ def render():
 # Lecture Viewer
 # ---------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
-def _cached_pdf(lecture_id: int, _lecture: dict) -> bytes:
-    from services.pdf_service import generate_pdf
-    return generate_pdf(_lecture).getvalue()
-
-
 def _show_viewer(lecture_id: int):
     lecture = get_lecture_by_id(lecture_id)
     if not lecture:
@@ -111,19 +105,19 @@ def _show_viewer(lecture_id: int):
 
     st.divider()
 
-    # ---- PDF download button ----
+    # --- PDF download ---
     try:
-        pdf_bytes = _cached_pdf(lecture_id, lecture)
+        from services.pdf_service import generate_lecture_pdf
+        pdf_bytes = generate_lecture_pdf(lecture)
         safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")
-        filename = f"{safe_title}_Study_Guide.pdf" if safe_title else "Study_Guide.pdf"
         st.download_button(
-            label="Download Study Guide PDF",
+            label="Download PDF",
             data=pdf_bytes,
-            file_name=filename,
+            file_name=f"{safe_title or 'lecture'}.pdf",
             mime="application/pdf",
         )
-    except Exception:
-        st.error("Unable to generate PDF. Please try again.")
+    except Exception as exc:
+        st.error(f"PDF generation failed: {exc}")
 
     st.divider()
 
@@ -165,7 +159,7 @@ def _notes_tab(lecture: dict):
 
 
 # ===========================================================================
-# Flashcards — Two-stage learning system
+# Flashcards — card-by-card learn → test → feedback flow
 # ===========================================================================
 
 def _flashcards_tab(lecture: dict):
@@ -178,77 +172,50 @@ def _flashcards_tab(lecture: dict):
     sk = f"fc_{lec_id}"
     if sk not in st.session_state:
         st.session_state[sk] = {
-            "mode": "learn",     # "learn" | "test" | "complete"
-            "learn_idx": 0,
-            "test_idx": 0,
-            "test_result": None,
-            "results": [],       # list of "correct" | "partial" | "incorrect"
+            "card_idx": 0,       # current card (0-based)
+            "phase": "learn",    # "learn" | "testing" | "evaluated"
+            "eval_result": None,
+            "results": [],       # "correct" | "partial" | "incorrect" per card
+            "done": False,
         }
     s = st.session_state[sk]
 
-    if s["mode"] == "learn":
-        _fc_learn(flashcards, s)
-    elif s["mode"] == "test":
-        _fc_test(flashcards, s, lec_id)
-    else:
-        _fc_complete(flashcards, s)
+    if s["done"]:
+        _fc_summary(s)
+        return
 
-
-def _fc_learn(flashcards: list, s: dict):
     n = len(flashcards)
-    idx = s["learn_idx"]
+    idx = s["card_idx"]
     card = flashcards[idx]
+    phase = s["phase"]
 
-    st.caption(f"Learn Mode  ·  Card {idx + 1} of {n}")
+    phase_labels = {"learn": "Study", "testing": "Testing", "evaluated": "Result"}
+    st.caption(f"Card {idx + 1} of {n}  ·  {phase_labels[phase]}")
     st.markdown("")
 
+    # Question — always visible
     with st.container(border=True):
         st.markdown("**Question:**")
         st.markdown(card.get("question", ""))
-        st.divider()
-        st.markdown("**Answer:**")
-        st.markdown(card.get("answer", ""))
 
     st.markdown("")
-    col_prev, col_next = st.columns(2)
-    with col_prev:
-        if st.button("← Previous Card", disabled=(idx == 0), use_container_width=True):
-            s["learn_idx"] -= 1
+
+    # ---- Learn phase: show answer + Test Myself ----
+    if phase == "learn":
+        with st.container(border=True):
+            st.markdown("**Answer:**")
+            st.markdown(card.get("answer", ""))
+
+        st.markdown("")
+        if st.button("Test Myself", type="primary", use_container_width=True):
+            s["phase"] = "testing"
             st.rerun()
-    with col_next:
-        if idx < n - 1:
-            if st.button("Next Card →", use_container_width=True):
-                s["learn_idx"] += 1
-                st.rerun()
-        else:
-            if st.button("Start Flashcard Test", type="primary", use_container_width=True):
-                s["mode"] = "test"
-                s["test_idx"] = 0
-                s["test_result"] = None
-                s["results"] = []
-                st.rerun()
 
-
-def _fc_test(flashcards: list, s: dict, lec_id: int):
-    n = len(flashcards)
-    idx = s["test_idx"]
-    card = flashcards[idx]
-
-    st.caption(f"Test Mode  ·  Question {idx + 1} of {n}")
-    st.markdown("")
-
-    with st.container(border=True):
-        st.markdown("**Question:**")
-        st.markdown(card.get("question", ""))
-
-    st.markdown("")
-    result = s["test_result"]
-
-    if result is None:
-        # Input phase
+    # ---- Testing phase: text input + Check Answer ----
+    elif phase == "testing":
         answer_key = f"fc_ans_{lec_id}_{idx}"
         student_answer = st.text_area(
-            "Type your answer:",
+            "Type your answer from memory:",
             key=answer_key,
             height=120,
             placeholder="Write your answer from memory…",
@@ -265,10 +232,13 @@ def _fc_test(flashcards: list, s: dict, lec_id: int):
                     expected_answer=card.get("answer", ""),
                     student_answer=student_answer.strip(),
                 )
-            s["test_result"] = eval_result
+            s["eval_result"] = eval_result
+            s["phase"] = "evaluated"
             st.rerun()
+
+    # ---- Evaluated phase: show result + Next / Finish ----
     else:
-        # Result phase
+        result = s["eval_result"] or {}
         result_label = result.get("result", "❌ Incorrect")
         feedback = result.get("feedback", "")
         expected = result.get("expected") or card.get("answer", "")
@@ -283,12 +253,14 @@ def _fc_test(flashcards: list, s: dict, lec_id: int):
         if feedback:
             st.markdown(f"**Feedback:** {feedback}")
 
-        with st.expander("Show Expected Answer"):
-            st.markdown(expected)
+        # Always show expected answer when not fully correct
+        if "✅" not in result_label:
+            with st.expander("Expected Answer", expanded=True):
+                st.markdown(expected)
 
         st.markdown("")
 
-        def _record(result_label: str):
+        def _record():
             if "✅" in result_label:
                 s["results"].append("correct")
             elif "⚠️" in result_label:
@@ -297,52 +269,51 @@ def _fc_test(flashcards: list, s: dict, lec_id: int):
                 s["results"].append("incorrect")
 
         if idx < n - 1:
-            if st.button("Next Question →", type="primary", use_container_width=True):
-                _record(result_label)
-                s["test_idx"] += 1
-                s["test_result"] = None
+            if st.button("Next Flashcard →", type="primary", use_container_width=True):
+                _record()
+                s["card_idx"] += 1
+                s["phase"] = "learn"
+                s["eval_result"] = None
                 st.rerun()
         else:
             if st.button("See My Results", type="primary", use_container_width=True):
-                _record(result_label)
-                s["mode"] = "complete"
+                _record()
+                s["done"] = True
                 st.rerun()
 
 
-def _fc_complete(flashcards: list, s: dict):
+def _fc_summary(s: dict):
     results = s.get("results", [])
-    n = len(flashcards)
+    n = len(results)
     correct = results.count("correct")
     partial = results.count("partial")
     incorrect = results.count("incorrect")
-    total = correct + partial + incorrect
-    accuracy = int((correct + partial * 0.5) / total * 100) if total > 0 else 0
+    accuracy = int((correct + partial * 0.5) / n * 100) if n > 0 else 0
 
-    st.markdown("### Flashcard Test Complete")
+    st.markdown("### Flashcard Session Complete")
     st.markdown("")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Questions", total)
+    c1.metric("Total", n)
     c2.metric("✅ Correct", correct)
     c3.metric("⚠️ Partially Correct", partial)
     c4.metric("❌ Incorrect", incorrect)
-
     st.metric("Accuracy", f"{accuracy}%")
 
     st.markdown("")
-    col_r, col_l = st.columns(2)
-    with col_r:
-        if st.button("Retake Test", use_container_width=True):
-            s.update({"mode": "test", "test_idx": 0, "test_result": None, "results": []})
-            st.rerun()
-    with col_l:
-        if st.button("Return to Learn Mode", use_container_width=True):
-            s.update({"mode": "learn", "learn_idx": 0, "test_result": None, "results": []})
-            st.rerun()
+    if st.button("Restart Flashcards", use_container_width=True):
+        s.update({
+            "card_idx": 0,
+            "phase": "learn",
+            "eval_result": None,
+            "results": [],
+            "done": False,
+        })
+        st.rerun()
 
 
 # ===========================================================================
-# Quiz — Interactive per-question submission with score tracking
+# Quiz — interactive per-question submission with score tracking
 # ===========================================================================
 
 def _quiz_tab(lecture: dict):

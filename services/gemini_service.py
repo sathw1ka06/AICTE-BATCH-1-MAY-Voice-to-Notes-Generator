@@ -1,3 +1,4 @@
+import json
 import re
 import time
 
@@ -177,38 +178,61 @@ def _parse_flashcards(text: str) -> list:
     return cards
 
 
-_EVAL_TEMPLATE = """You are an educational assessment assistant evaluating a student's flashcard answer.
+def evaluate_flashcard_answer(question: str, expected_answer: str, student_answer: str) -> dict:
+    """Call Gemini to semantically evaluate a student's flashcard answer."""
+    # f-string avoids .format() breaking on curly braces inside academic content
+    prompt = f"""You are a strict educational assessment assistant.
+
+Evaluate the student's answer to the flashcard question below using semantic understanding, NOT exact wording.
 
 Question: {question}
 Expected Answer: {expected_answer}
 Student's Answer: {student_answer}
 
-Evaluate semantic understanding — do NOT require exact wording.
+STRICT SCORING RULES:
+- Score 90-100 (Correct): Answer demonstrates clear, accurate understanding of the core concept. Minor synonym differences are acceptable.
+- Score 60-89 (Partially Correct): Answer shows some understanding but is missing important concepts, key terms, or contains minor inaccuracies.
+- Score 0-59 (Incorrect): Answer is wrong, off-topic, irrelevant, a single random word, or shows no meaningful understanding of the concept.
 
-Respond in EXACTLY this format (one field per line, no extra lines):
-Result: [Correct, Partially Correct, or Incorrect]
-Feedback: [one sentence explaining your evaluation]
-Expected: [restate the expected answer verbatim]
+MANDATORY RULES — these override everything else:
+1. If the student's answer has nothing to do with the question, score MUST be 0.
+2. If the student only restates the question without explaining the concept, score MUST be below 60.
+3. If the student's answer is a random word or phrase unrelated to the expected answer, score MUST be 0.
+4. Missing ALL key concepts from the expected answer → score below 60.
+5. Scores of 90+ require the student to cover the main idea of the expected answer.
 
-Criteria:
-- Correct: student demonstrates clear understanding of the core concept
-- Partially Correct: student shows some understanding but misses key aspects
-- Incorrect: answer is wrong, off-topic, or shows no relevant understanding"""
+Respond with ONLY valid JSON — no markdown, no code fences, no explanation outside the JSON:
+{{"result": "Correct", "score": 95, "feedback": "one sentence explaining the score", "expected_answer": "verbatim expected answer here"}}
 
+result must be exactly one of: "Correct", "Partially Correct", "Incorrect" — chosen by score threshold above."""
 
-def evaluate_flashcard_answer(question: str, expected_answer: str, student_answer: str) -> dict:
-    """Call Gemini to semantically evaluate a student's flashcard answer."""
-    prompt = _EVAL_TEMPLATE.format(
-        question=question,
-        expected_answer=expected_answer,
-        student_answer=student_answer,
-    )
     raw = _generate_with_retry(prompt, temperature=0.1)
     return _parse_evaluation(raw, expected_answer)
 
 
 def _parse_evaluation(text: str, fallback_expected: str = "") -> dict:
+    """Parse Gemini's JSON evaluation response, with text fallback."""
     out = {"result": "❌ Incorrect", "feedback": "", "expected": fallback_expected}
+
+    # Strip markdown fences Gemini occasionally adds despite instructions
+    cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().strip("`").strip()
+
+    try:
+        data = json.loads(cleaned)
+        score = int(data.get("score", 0))
+        if score >= 90:
+            out["result"] = "✅ Correct"
+        elif score >= 60:
+            out["result"] = "⚠️ Partially Correct"
+        else:
+            out["result"] = "❌ Incorrect"
+        out["feedback"] = str(data.get("feedback", "")).strip()
+        out["expected"] = str(data.get("expected_answer", "") or fallback_expected).strip()
+        return out
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
+    # Fallback: plain-text parsing for malformed responses
     for line in text.splitlines():
         stripped = line.strip()
         low = stripped.lower()
@@ -218,12 +242,8 @@ def _parse_evaluation(text: str, fallback_expected: str = "") -> dict:
                 out["result"] = "⚠️ Partially Correct"
             elif "correct" in val:
                 out["result"] = "✅ Correct"
-            else:
-                out["result"] = "❌ Incorrect"
         elif low.startswith("feedback:"):
             out["feedback"] = stripped[9:].strip()
-        elif low.startswith("expected:"):
-            out["expected"] = stripped[9:].strip()
     return out
 
 
